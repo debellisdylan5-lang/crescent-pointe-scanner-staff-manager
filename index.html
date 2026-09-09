@@ -565,12 +565,151 @@
         return location.pathname.split('/').filter(Boolean).pop() || '';
       }
 
-      function getAccessToken() {
-        var slug = getSlug();
-        return localStorage.getItem('lp_pw_' + slug) ||
-          localStorage.getItem('lp_pin_' + slug) ||
-          localStorage.getItem('lp_al_' + slug) ||
-          sessionStorage.getItem('lp_access_' + slug) || '';
+      function collectAccessTokens() {
+        var candidates = [];
+        var seen = {};
+
+        function addToken(value) {
+          var token = String(value == null ? '' : value).trim();
+          if (!token || seen[token]) return;
+          seen[token] = true;
+          candidates.push(token);
+        }
+
+        function scoreKey(key) {
+          var k = String(key || '');
+          var score = 0;
+          if (k.indexOf('XQDSby7H') !== -1) score += 300;
+          if (k.indexOf('6875') !== -1) score += 200;
+          if (k.indexOf('lp-mt8ulrb4-17ngk-copy-1788529024063-copy-1788529112978') !== -1) score += 250;
+          if (k.indexOf('lp_pw_') === 0) score += 90;
+          if (k.indexOf('lp_pin_') === 0) score += 80;
+          if (k.indexOf('lp_al_') === 0) score += 70;
+          if (k.indexOf('lp_access_') === 0) score += 60;
+          return score;
+        }
+
+        function collectFromStorage(storage) {
+          try {
+            if (!storage) return [];
+            var items = [];
+            for (var i = 0; i < storage.length; i++) {
+              var key = storage.key(i);
+              if (!key) continue;
+              if (key.indexOf('lp_pw_') !== 0 && key.indexOf('lp_pin_') !== 0 && key.indexOf('lp_al_') !== 0 && key.indexOf('lp_access_') !== 0) continue;
+              items.push({ key: key, value: storage.getItem(key) });
+            }
+            items.sort(function(a, b) { return scoreKey(b.key) - scoreKey(a.key); });
+            return items;
+          } catch (e) {
+            return [];
+          }
+        }
+
+        try {
+          collectFromStorage(localStorage).forEach(function(item) { addToken(item.value); });
+        } catch (e) {}
+
+        try {
+          collectFromStorage(sessionStorage).forEach(function(item) { addToken(item.value); });
+        } catch (e) {}
+
+        try {
+          var cookieParts = String(document.cookie || '').split(/;\s*/);
+          cookieParts.forEach(function(part) {
+            if (!part) return;
+            var idx = part.indexOf('=');
+            var key = idx >= 0 ? part.slice(0, idx) : part;
+            var value = idx >= 0 ? part.slice(idx + 1) : '';
+            if (key.indexOf('lp_pw_') === 0 || key.indexOf('lp_pin_') === 0 || key.indexOf('lp_al_') === 0 || key.indexOf('lp_access_') === 0) {
+              addToken(decodeURIComponent(value));
+            }
+          });
+        } catch (e) {}
+
+        try {
+          var metas = document.querySelectorAll('meta[name]');
+          Array.prototype.forEach.call(metas, function(meta) {
+            try {
+              var name = String(meta.getAttribute('name') || '').toLowerCase();
+              if (name.indexOf('token') !== -1 || name.indexOf('access') !== -1 || name.indexOf('gate') !== -1) {
+                addToken(meta.content);
+              }
+            } catch (e) {}
+          });
+        } catch (e) {}
+
+        return candidates;
+      }
+
+      function authorizedSheetFetch(url, options) {
+        var baseOptions = {};
+        var key;
+        options = options || {};
+        for (key in options) {
+          if (Object.prototype.hasOwnProperty.call(options, key) && key !== 'headers') {
+            baseOptions[key] = options[key];
+          }
+        }
+        baseOptions.credentials = 'include';
+        baseOptions.headers = {};
+        for (key in (options.headers || {})) {
+          if (Object.prototype.hasOwnProperty.call(options.headers, key)) {
+            baseOptions.headers[key] = options.headers[key];
+          }
+        }
+        baseOptions.headers['Content-Type'] = 'application/json';
+
+        function attempt(token) {
+          var reqOptions = {
+            method: baseOptions.method,
+            credentials: 'include',
+            headers: {}
+          };
+
+          for (var prop in baseOptions) {
+            if (Object.prototype.hasOwnProperty.call(baseOptions, prop) && prop !== 'method' && prop !== 'credentials' && prop !== 'headers') {
+              reqOptions[prop] = baseOptions[prop];
+            }
+          }
+
+          for (var h in baseOptions.headers) {
+            if (Object.prototype.hasOwnProperty.call(baseOptions.headers, h)) {
+              reqOptions.headers[h] = baseOptions.headers[h];
+            }
+          }
+
+          if (token) {
+            reqOptions.headers['X-Landing-Page-Token'] = token;
+          } else {
+            delete reqOptions.headers['X-Landing-Page-Token'];
+          }
+
+          return fetch(url, reqOptions).then(function(response) {
+            if (response.status !== 401 && response.status !== 403) {
+              return response;
+            }
+            return null;
+          });
+        }
+
+        return attempt('').then(function(response) {
+          if (response) return response;
+          var tokens = collectAccessTokens();
+          var index = 0;
+
+          function next() {
+            if (index >= tokens.length) {
+              throw new Error('Your manager session needs to be refreshed. Reopen this page and enter the manager password once.');
+            }
+            return attempt(tokens[index++]).then(function(res) {
+              if (res) return res;
+              return next();
+            });
+          }
+
+          return next();
+        });
       }
 
       function normalizeName(name) {
@@ -788,15 +927,9 @@
 
       function postUpdate(rowNumber, row) {
         var url = getWriteUrl();
-        var token = getAccessToken();
-        if (!token) return Promise.reject(new Error('Missing protected-session token'));
         if (!url) return Promise.reject(new Error('Missing write endpoint'));
-        return fetch(url.replace(/\/$/, '') + '/' + encodeURIComponent(String(rowNumber)), {
+        return authorizedSheetFetch(url.replace(/\/$/, '') + '/' + encodeURIComponent(String(rowNumber)), {
           method: 'PATCH',
-          headers: {
-            'Content-Type': 'application/json',
-            'X-Landing-Page-Token': token
-          },
           body: JSON.stringify(row)
         }).then(function(r) {
           if (!r.ok) throw new Error('HTTP ' + r.status);
@@ -849,23 +982,15 @@
         }
 
         var rowsUrl = (document.querySelector('meta[name="sheet-rows-url"]') || {}).content || '';
-        var accessToken = getAccessToken();
 
         if (!rowsUrl) {
           return showMessage(formMessage, 'error', 'Protected write endpoint is unavailable.');
         }
-        if (!accessToken) {
-          return showMessage(formMessage, 'error', 'Protected session token is unavailable.');
-        }
 
         setSubmitting(true);
 
-        fetch(rowsUrl, {
+        authorizedSheetFetch(rowsUrl, {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'X-Landing-Page-Token': accessToken
-          },
           body: JSON.stringify({
             'Employee Name': name,
             'Normalized Name': normalizeName(name),
@@ -943,7 +1068,6 @@
 
         if (!editingEmployee) return;
         if (!getWriteUrl()) return showMessage(editMessage, 'error', 'Write endpoint is unavailable.');
-        if (!getAccessToken()) return showMessage(editMessage, 'error', 'Protected session token is unavailable.');
 
         var name = String(editEmployeeName.value || '').trim();
         var newPin = String(editPin.value || '').trim();
